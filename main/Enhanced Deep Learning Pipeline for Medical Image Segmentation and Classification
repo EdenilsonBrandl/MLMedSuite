@@ -1,0 +1,140 @@
+# MedSegNet+: Enhanced Medical Image Segmentation and Classification
+
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import tensorflow_datasets as tfds
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Enable mixed precision if desired
+# from tensorflow.keras import mixed_precision
+# mixed_precision.set_global_policy("mixed_float16")
+
+# --- 1. Load and Prepare Data ---
+def normalize(input_image, input_mask):
+    input_image = tf.image.resize(input_image, (128, 128)) / 255.0
+    input_mask = tf.image.resize(input_mask, (128, 128))
+    input_mask = tf.where(input_mask == 1, 1, 0)  # Binary mask: 1=pet, else 0
+    return input_image, input_mask
+
+def load_image(datapoint):
+    image = datapoint['image']
+    mask = datapoint['segmentation_mask']
+    return normalize(image, mask)
+
+def load_dataset():
+    dataset, info = tfds.load('oxford_iiit_pet:3.*.*', with_info=True)
+    train = dataset['train'].map(load_image).cache().shuffle(1000).batch(32).prefetch(tf.data.AUTOTUNE)
+    test = dataset['test'].map(load_image).batch(32).prefetch(tf.data.AUTOTUNE)
+    return train, test
+
+# --- 2. Build Model (U-Net + Classifier Head) ---
+def conv_block(x, filters):
+    x = layers.Conv2D(filters, 3, activation='relu', padding='same')(x)
+    x = layers.Conv2D(filters, 3, activation='relu', padding='same')(x)
+    return x
+
+def build_medsegnet_plus():
+    inputs = layers.Input((128, 128, 3))
+    
+    # Encoder
+    c1 = conv_block(inputs, 32)
+    p1 = layers.MaxPooling2D()(c1)
+
+    c2 = conv_block(p1, 64)
+    p2 = layers.MaxPooling2D()(c2)
+
+    c3 = conv_block(p2, 128)
+
+    # Decoder
+    u1 = layers.UpSampling2D()(c3)
+    c4 = conv_block(layers.Concatenate()([u1, c2]), 64)
+
+    u2 = layers.UpSampling2D()(c4)
+    c5 = conv_block(layers.Concatenate()([u2, c1]), 32)
+
+    # Outputs
+    seg_output = layers.Conv2D(1, 1, activation='sigmoid', name='segmentation')(c5)
+
+    x = layers.GlobalAveragePooling2D()(c3)
+    x = layers.Dense(64, activation='relu')(x)
+    class_output = layers.Dense(1, activation='sigmoid', name='classification')(x)
+
+    return models.Model(inputs, [seg_output, class_output])
+
+# --- 3. Dice Metric for Segmentation ---
+def dice_coefficient(y_true, y_pred, smooth=1e-6):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.round(y_pred)
+    intersection = tf.reduce_sum(y_true * y_pred)
+    return (2. * intersection + smooth) / (tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) + smooth)
+
+# --- 4. Classification Label from Mask ---
+def prepare_multitask_dataset(ds):
+    def map_fn(image, mask):
+        class_label = tf.cast(tf.reduce_any(tf.equal(mask, 1)), tf.float32)
+        class_label = tf.expand_dims(class_label, -1)
+        return image, {'segmentation': mask, 'classification': class_label}
+    return ds.map(map_fn)
+
+# --- 5. Training and Visualization ---
+def visualize_predictions(model, dataset):
+    for images, labels in dataset.take(1):
+        preds = model.predict(images)
+        pred_masks, pred_classes = preds
+        true_masks = labels['segmentation']
+        true_classes = labels['classification']
+
+        for i in range(3):
+            plt.figure(figsize=(12, 4))
+            plt.subplot(1, 4, 1)
+            plt.title("Input Image")
+            plt.imshow(images[i])
+            plt.axis('off')
+
+            plt.subplot(1, 4, 2)
+            plt.title("True Mask")
+            plt.imshow(true_masks[i, ..., 0], cmap='gray')
+            plt.axis('off')
+
+            plt.subplot(1, 4, 3)
+            plt.title("Predicted Mask")
+            plt.imshow(pred_masks[i, ..., 0], cmap='gray')
+            plt.axis('off')
+
+            plt.subplot(1, 4, 4)
+            plt.title(f"Class: {int(pred_classes[i][0] > 0.5)} (Prob: {pred_classes[i][0]:.2f})")
+            plt.imshow(images[i])
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+
+# --- 6. Run Everything ---
+if __name__ == '__main__':
+    train_ds, test_ds = load_dataset()
+    train_mt = prepare_multitask_dataset(train_ds)
+    test_mt = prepare_multitask_dataset(test_ds)
+
+    model = build_medsegnet_plus()
+    model.compile(
+        optimizer='adam',
+        loss={
+            'segmentation': 'binary_crossentropy',
+            'classification': 'binary_crossentropy'
+        },
+        metrics={
+            'segmentation': [dice_coefficient],
+            'classification': ['accuracy']
+        }
+    )
+
+    model.summary()
+    model.fit(train_mt, epochs=5, validation_data=test_mt)
+
+    # Evaluation
+    results = model.evaluate(test_mt)
+    print("Test results:", results)
+
+    # Visualization
+    visualize_predictions(model, test_mt)
