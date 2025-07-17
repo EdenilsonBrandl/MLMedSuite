@@ -1,0 +1,119 @@
+# HealthOptimus: ML-Enhanced Business Lab for Healthcare Operations
+# Author: Edenilson Brandl (2025)
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+import joblib
+
+# 1. Generate Synthetic Healthcare Data
+def generate_synthetic_healthcare_data(n_days=365):
+    np.random.seed(42)
+    data = []
+    for day in range(n_days):
+        weekday = day % 7  # 0=Mon
+        month = (day // 30) % 12 + 1
+        is_holiday = 1 if np.random.rand() < 0.05 else 0
+
+        base_arrivals = 45 + 15 * np.sin(2 * np.pi * weekday / 7) + 8 * np.cos(2 * np.pi * month / 12)
+        noise = np.random.normal(0, 6)
+        patient_arrivals = max(0, int(base_arrivals + noise + is_holiday * -10))
+
+        avg_treatment_time = np.random.uniform(20, 60)
+        emergency_cases = np.random.poisson(4 + 3 * np.sin(2 * np.pi * weekday / 7))
+        icu_ratio = np.random.uniform(0.05, 0.2)
+
+        required_staff = int(patient_arrivals * 0.1 + emergency_cases * 1.5 + icu_ratio * 10 + np.random.normal(0, 2))
+
+        data.append({
+            'day': day,
+            'weekday': weekday,
+            'month': month,
+            'is_holiday': is_holiday,
+            'patient_arrivals': patient_arrivals,
+            'avg_treatment_time': avg_treatment_time,
+            'emergency_cases': emergency_cases,
+            'icu_ratio': round(icu_ratio, 2),
+            'required_staff': max(1, required_staff)
+        })
+
+    return pd.DataFrame(data)
+
+# 2. Train Model Using Pipeline
+def train_model(df):
+    features = ['weekday', 'month', 'is_holiday', 'patient_arrivals',
+                'avg_treatment_time', 'emergency_cases', 'icu_ratio']
+    target = 'required_staff'
+
+    X = df[features]
+    y = df[target]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', RandomForestRegressor(n_estimators=100, random_state=42))
+    ])
+
+    pipeline.fit(X_train, y_train)
+    y_pred = pipeline.predict(X_test)
+
+    print("\n📊 Model Performance:")
+    print(f"MAE: {mean_absolute_error(y_test, y_pred):.2f}")
+    print(f"MSE: {mean_squared_error(y_test, y_pred):.2f}")
+    print(f"R²:  {r2_score(y_test, y_pred):.2f}")
+
+    plt.figure(figsize=(10, 5))
+    sns.scatterplot(x=y_test, y=y_pred, alpha=0.7)
+    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+    plt.title("Actual vs Predicted Required Staff")
+    plt.xlabel("Actual")
+    plt.ylabel("Predicted")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    joblib.dump(pipeline, "healthoptimus_model.pkl")
+    return pipeline
+
+# 3. Predict for New Day
+def predict_for_new_day(model, new_day_input):
+    input_df = pd.DataFrame([new_day_input])
+    predicted_staff = model.predict(input_df)[0]
+    print(f"\n🔍 Predicted Required Staff: {predicted_staff:.2f}")
+    return predicted_staff
+
+# 4. Recommend Staff Allocation
+def recommend_staff_allocation(predicted_staff, max_available=20):
+    allocation = int(min(round(predicted_staff), max_available))
+    print(f"✅ Recommended Allocation: {allocation} staff members")
+    return allocation
+
+# 5. Main Execution (for Colab)
+if __name__ == "__main__":
+    print("🔄 Generating synthetic healthcare data...")
+    df = generate_synthetic_healthcare_data()
+    print(df.head())
+
+    print("\n🚀 Training ML model...")
+    model = train_model(df)
+
+    # Example prediction
+    new_day = {
+        'weekday': 1,              # Tuesday
+        'month': 8,                # August
+        'is_holiday': 0,
+        'patient_arrivals': 72,
+        'avg_treatment_time': 48.5,
+        'emergency_cases': 6,
+        'icu_ratio': 0.12
+    }
+
+    predicted_staff = predict_for_new_day(model, new_day)
+    recommend_staff_allocation(predicted_staff, max_available=18)
