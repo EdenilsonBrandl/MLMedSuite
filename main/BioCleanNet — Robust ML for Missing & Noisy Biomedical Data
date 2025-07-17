@@ -1,0 +1,140 @@
+# BioCleanNet: Robust ML for Missing and Noisy Biomedical Data
+
+# Install required packages (XGBoost, missingno for missing data visualization)
+!pip install xgboost missingno --quiet
+
+import numpy as np
+import pandas as pd
+import missingno as msno
+import matplotlib.pyplot as plt
+import warnings
+
+from sklearn.datasets import make_classification
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report, accuracy_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+
+warnings.filterwarnings('ignore')
+
+# Set global random seed
+RANDOM_STATE = 42
+
+# 1. Generate synthetic biomedical-like classification dataset
+X, y = make_classification(
+    n_samples=1000,
+    n_features=20,
+    n_informative=15,
+    n_redundant=5,
+    n_classes=2,
+    random_state=RANDOM_STATE
+)
+df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(X.shape[1])])
+df['target'] = y
+
+print(f"Original dataset shape: {df.shape}")
+
+# 2. Function to inject missing values randomly into dataframe
+def inject_missing(df_in, missing_frac=0.1, random_state=RANDOM_STATE):
+    df = df_in.copy()
+    np.random.seed(random_state)
+    n_samples, n_features = df.shape
+    n_missing = int(np.floor(missing_frac * n_samples * n_features))
+    
+    missing_indices = (
+        np.random.randint(0, n_samples, n_missing),
+        np.random.randint(0, n_features, n_missing)
+    )
+    df.values[missing_indices] = np.nan
+    return df
+
+# 3. Function to inject Gaussian noise into dataframe
+def inject_noise(df_in, noise_frac=0.1, noise_std=3.0, random_state=RANDOM_STATE):
+    df = df_in.copy()
+    np.random.seed(random_state)
+    n_samples, n_features = df.shape
+    n_noisy = int(noise_frac * n_samples * n_features)
+    
+    for _ in range(n_noisy):
+        i = np.random.randint(0, n_samples)
+        j = np.random.randint(0, n_features)
+        df.iat[i, j] += np.random.normal(0, noise_std)
+    return df
+
+# 4. Inject missing values only on feature columns, keep target intact
+df_features_missing = inject_missing(df.drop(columns=['target']), missing_frac=0.1)
+df_missing = df_features_missing.copy()
+df_missing['target'] = df['target']
+
+print(f"Total missing values after injection: {df_missing.isna().sum().sum()}")
+
+# Optional: Visualize missing data pattern
+# msno.matrix(df_missing)
+# plt.show()
+
+# 5. Inject noise on data with missing values
+df_features_noisy = inject_noise(df_missing.drop(columns=['target']), noise_frac=0.1, noise_std=3.0)
+df_noisy = df_features_noisy.copy()
+df_noisy['target'] = df_missing['target']
+
+print(f"Data after noise injection.")
+
+# 6. Outlier capping transformer: caps data beyond 3 std devs
+class OutlierCapper(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        self.means_ = np.nanmean(X, axis=0)
+        self.stds_ = np.nanstd(X, axis=0)
+        return self
+    
+    def transform(self, X):
+        X_capped = X.copy()
+        for i in range(X.shape[1]):
+            upper = self.means_[i] + 3 * self.stds_[i]
+            lower = self.means_[i] - 3 * self.stds_[i]
+            X_capped[:, i] = np.clip(X_capped[:, i], lower, upper)
+        return X_capped
+
+# 7. Split dataset into train/test
+X = df_noisy.drop(columns=['target']).values
+y = df_noisy['target'].values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, stratify=y, random_state=RANDOM_STATE
+)
+
+# 8. Define pipelines: RF and XGB with median imputation, outlier capping, scaling
+pipeline_rf = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('outlier_capper', OutlierCapper()),
+    ('scaler', RobustScaler()),   # more robust to noise/outliers than StandardScaler
+    ('clf', RandomForestClassifier(random_state=RANDOM_STATE))
+])
+
+pipeline_xgb = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('outlier_capper', OutlierCapper()),
+    ('scaler', RobustScaler()),
+    ('clf', XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=RANDOM_STATE))
+])
+
+# 9. Train and evaluate function
+def train_and_evaluate(pipeline, model_name="Model"):
+    print(f"\nTraining {model_name}...")
+    pipeline.fit(X_train, y_train)
+    y_pred = pipeline.predict(X_test)
+    y_proba = pipeline.predict_proba(X_test)[:,1]
+    
+    acc = accuracy_score(y_test, y_pred)
+    roc_auc = roc_auc_score(y_test, y_proba)
+    
+    print(f"{model_name} Accuracy: {acc:.4f}")
+    print(f"{model_name} ROC AUC: {roc_auc:.4f}")
+    print(f"{model_name} Classification Report:\n{classification_report(y_test, y_pred)}")
+
+# 10. Run training and evaluation
+train_and_evaluate(pipeline_rf, "Random Forest")
+train_and_evaluate(pipeline_xgb, "XGBoost")
