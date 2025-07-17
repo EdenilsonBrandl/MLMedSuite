@@ -1,0 +1,156 @@
+# CodeQualNet+: Advanced ML-Powered Code Quality Intelligence for Scientific Programming
+
+# Install if missing
+# !pip install joblib seaborn
+
+import ast
+import re
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from joblib import dump
+
+# =============================
+# Feature extraction from code
+# =============================
+def extract_code_features(code_str):
+    features = {
+        'lines': 0,
+        'comment_lines': 0,
+        'num_functions': 0,
+        'num_classes': 0,
+        'avg_line_length': 0,
+        'todo_fixme_count': 0,
+        'comment_ratio': 0,
+        'num_imports': 0,
+        'bad_var_names': 0,
+        'avg_nodes_per_func': 0
+    }
+
+    lines = code_str.strip().split('\n')
+    features['lines'] = len(lines)
+    features['comment_lines'] = len([l for l in lines if l.strip().startswith('#')])
+    features['avg_line_length'] = np.mean([len(l) for l in lines]) if lines else 0
+    features['todo_fixme_count'] = len(re.findall(r'\b(TODO|FIXME)\b', code_str, re.IGNORECASE))
+    features['comment_ratio'] = features['comment_lines'] / features['lines'] if features['lines'] > 0 else 0
+
+    try:
+        tree = ast.parse(code_str)
+    except Exception:
+        return features  # Return default if code can't be parsed
+
+    features['num_functions'] = len([n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)])
+    features['num_classes'] = len([n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)])
+    features['num_imports'] = len([n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))])
+
+    # Bad variable names
+    var_names = [n.id for n in ast.walk(tree) if isinstance(n, ast.Name)]
+    bad_names = [name for name in var_names if len(name) <= 2 or name in ['i', 'j', 'x', 'y', 'z']]
+    features['bad_var_names'] = len(set(bad_names))
+
+    # Approximate cyclomatic complexity (number of nodes per function)
+    func_nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    if func_nodes:
+        total_nodes = [len(list(ast.walk(fn))) for fn in func_nodes]
+        features['avg_nodes_per_func'] = np.mean(total_nodes)
+
+    return features
+
+# =============================
+# Synthetic dataset generator
+# =============================
+def generate_synthetic_dataset(n_samples=500):
+    np.random.seed(42)
+    data, labels = [], []
+
+    for _ in range(n_samples):
+        features = {
+            'lines': np.random.randint(20, 200),
+            'comment_ratio': np.random.uniform(0, 0.3),
+            'num_functions': np.random.randint(0, 10),
+            'num_classes': np.random.randint(0, 3),
+            'todo_fixme_count': np.random.randint(0, 3),
+            'avg_line_length': np.random.uniform(20, 80),
+            'num_imports': np.random.randint(0, 5),
+            'bad_var_names': np.random.randint(0, 5),
+            'avg_nodes_per_func': np.random.uniform(5, 50),
+            'comment_lines': 0  # placeholder, not used in scoring
+        }
+        features['lines'] = max(features['lines'], 1)  # avoid div/0
+        features['comment_lines'] = int(features['comment_ratio'] * features['lines'])
+
+        score = 0
+        score += (features['comment_ratio'] > 0.05)
+        score += (features['num_functions'] > 2)
+        score += (features['todo_fixme_count'] == 0)
+        score += (features['lines'] < 150)
+        score += (features['avg_line_length'] < 70)
+        score += (features['num_imports'] >= 1)
+        score += (features['bad_var_names'] < 3)
+
+        if score >= 5:
+            labels.append('Good')
+        elif score >= 3:
+            labels.append('Average')
+        else:
+            labels.append('Poor')
+
+        data.append(features)
+
+    return pd.DataFrame(data), labels
+
+# =============================
+# Train ML model
+# =============================
+def train_model(X, y):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+    clf = RandomForestClassifier(n_estimators=150, max_depth=12, random_state=42)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    print("\n=== Classification Report ===")
+    print(classification_report(y_test, y_pred))
+
+    return clf
+
+# =============================
+# Main Execution
+# =============================
+if __name__ == "__main__":
+    # 1. Create synthetic dataset
+    df_features, labels = generate_synthetic_dataset()
+
+    # 2. Visualize
+    sns.pairplot(df_features.assign(label=labels), hue='label', diag_kind='kde')
+    plt.suptitle("Feature Distributions by Code Quality", fontsize=14)
+    plt.show()
+
+    # 3. Train and evaluate model
+    model = train_model(df_features, labels)
+
+    # 4. Save model
+    dump(model, "codequalnet_model.joblib")
+
+    # 5. Predict example
+    sample_code = '''
+    # Example scientific code with quality concerns
+
+    import numpy as np
+    import pandas as pd
+
+    def a(x):
+        return x + 1
+
+    def compute(data):
+        return np.mean(data)  # TODO: check normalization
+    '''
+
+    extracted = extract_code_features(sample_code)
+    pred_df = pd.DataFrame([extracted])
+    prediction = model.predict(pred_df)[0]
+
+    print(f"\nPredicted Code Quality: {prediction}")
