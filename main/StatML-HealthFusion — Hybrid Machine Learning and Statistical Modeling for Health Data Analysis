@@ -1,0 +1,98 @@
+# Install necessary libraries
+!pip install statsmodels scikit-learn matplotlib --quiet
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import StandardScaler
+
+import statsmodels.api as sm
+
+# --- Step 1: Generate synthetic health dataset ---
+X, y = make_classification(
+    n_samples=1000,
+    n_features=10,
+    n_informative=7,
+    n_redundant=2,
+    n_classes=2,
+    random_state=42
+)
+feature_names = [f"feature_{i}" for i in range(X.shape[1])]
+df = pd.DataFrame(X, columns=feature_names)
+df['target'] = y
+
+print("Dataset sample:")
+print(df.head())
+
+# --- Step 2: Split data for ML model ---
+X_train, X_test, y_train, y_test = train_test_split(
+    df[feature_names], df['target'], 
+    test_size=0.25, 
+    stratify=df['target'], 
+    random_state=42
+)
+
+# Scale features for better statsmodels convergence
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(df[feature_names])
+df_scaled = pd.DataFrame(X_scaled, columns=feature_names)
+df_scaled['target'] = df['target'].values
+df_scaled['intercept'] = 1
+
+# --- Step 3: Traditional statistical model - Logistic Regression with statsmodels ---
+logit_model = sm.Logit(df_scaled['target'], df_scaled[['intercept'] + feature_names])
+result = logit_model.fit(disp=0)
+
+print("\nLogistic Regression Summary (statsmodels):")
+print(result.summary())
+
+# --- Step 4: Machine Learning model - Random Forest Classifier ---
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+
+print("\nRandom Forest Classification Report:")
+print(classification_report(y_test, y_pred_rf))
+print(f"Random Forest Accuracy: {accuracy_score(y_test, y_pred_rf):.4f}")
+
+# Cross-validation for RF
+cv_scores = cross_val_score(rf, df[feature_names], df['target'], cv=5)
+print(f"Random Forest 5-fold CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+
+# --- Step 5: Hybrid Model - Augment RF features with logistic regression predicted probabilities ---
+
+# Get indices of train/test in the scaled dataframe for logistic regression predictions
+train_idx = X_train.index
+test_idx = X_test.index
+
+logit_train_probs = result.predict(df_scaled.loc[train_idx][['intercept'] + feature_names])
+logit_test_probs = result.predict(df_scaled.loc[test_idx][['intercept'] + feature_names])
+
+X_train_hybrid = X_train.copy()
+X_train_hybrid['logit_prob'] = logit_train_probs
+
+X_test_hybrid = X_test.copy()
+X_test_hybrid['logit_prob'] = logit_test_probs
+
+rf_hybrid = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_hybrid.fit(X_train_hybrid, y_train)
+y_pred_hybrid = rf_hybrid.predict(X_test_hybrid)
+
+print("\nHybrid Model (Logistic Regression probs + RF) Classification Report:")
+print(classification_report(y_test, y_pred_hybrid))
+print(f"Hybrid Model Accuracy: {accuracy_score(y_test, y_pred_hybrid):.4f}")
+
+# --- Step 6: Plot feature importances of the hybrid RF model ---
+importances = rf_hybrid.feature_importances_
+features = X_train_hybrid.columns
+
+plt.figure(figsize=(10,6))
+plt.barh(features, importances, color='teal')
+plt.xlabel('Feature Importance')
+plt.title('Hybrid Model Feature Importances')
+plt.show()
